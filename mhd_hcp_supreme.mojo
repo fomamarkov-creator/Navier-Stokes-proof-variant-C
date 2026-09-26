@@ -1,3 +1,4 @@
+cat << 'EOF' > mhd_hcp_supreme.mojo
 from math import sin, cos, sqrt
 from algorithm import parallelize
 from memory import UnsafePointer
@@ -56,6 +57,8 @@ fn get_hcp_shift(k: Int, m: Int) -> (Int, Int, Int):
         elif m == 9: return (0, 0, -1)
         elif m == 10: return (-1, 0, -1)
         else: return (0, -1, -1)
+EOF
+cat << 'EOF' >> mhd_hcp_supreme.mojo
 # =========================================================================
 # БЛОК 2: МГД СТРУКТУРА С ПОДДЕРЖКОЙ ВЕКТОРОВ SIMD И RK4 БУФЕРОВ
 # =========================================================================
@@ -200,6 +203,8 @@ struct MHDSimulation:
             dB_out[idx] = SIMD[DType.float32, 4](-curl_Ex, -curl_Ey, -curl_Ez, 0.0)
 
         parallelize[compute_maxwell](GRID_SIZE)
+EOF
+cat << 'EOF' >> mhd_hcp_supreme.mojo
     # =========================================================================
     # БЛОК 3: ДВИЖОК МНОГОСТАДИЙНОГО ВРЕМЕННОГО ИНТЕГРИРОВАНИЯ RK4
     # =========================================================================
@@ -310,3 +315,4 @@ fn main() raises:
             break
     log_file.close()
     print("[DONE] Симуляция успешно завершена.")
+EOF
