@@ -1,3 +1,5 @@
+https://doi.org/10.5281/zenodo.22976921
+
 # Formal Verification Blueprint for the 3D Navier-Stokes Millennium Problem (Case C) via 3HCP Space Crystal Matrix Mechanics and Peripheral Recirculation Loops
 
 ## Author Intellectual Property & Declarations
