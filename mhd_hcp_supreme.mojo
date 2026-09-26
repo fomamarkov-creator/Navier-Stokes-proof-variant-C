@@ -2,6 +2,7 @@ from math import sin, cos, sqrt
 from algorithm import parallelize
 from memory import UnsafePointer
 from std.atomic import Atomic
+from sys import bswap
 
 # =========================================================================
 # БЛОК 1: ГЕОМЕТРИЧЕСКИЕ, ФИЗИЧЕСКИЕ И ВАРИАНТНЫЕ КОНСТАНТЫ
@@ -135,34 +136,29 @@ struct MHDSimulation:
             let j = (idx % (DIM * DIM)) // DIM
             let i = idx % DIM
 
-            # Честный дискретный curl B (Ток J) через смещения
+            # Дискретный curl B (Ток J) через смещения
             let b_center = B_in[idx]
-            let Jx = (B_in[get_idx(i, j+1, k)][2] - b_center[2]) - (B_in[get_idx(i, j, k+1)][1] - b_center[1])
-            let Jy = (B_in[get_idx(i, j, k+1)][0] - b_center[0]) - (B_in[get_idx(i+1, j, k)][2] - b_center[2])
-            let Jz = (B_in[get_idx(i+1, j, k)][1] - b_center[1]) - (B_in[get_idx(i, j+1, k)][0] - b_center[0])
+            let Jx = (B_in[get_idx(i, j+1, k)].get<2>() - b_center.get<2>()) - (B_in[get_idx(i, j, k+1)].get<1>() - b_center.get<1>())
+            let Jy = (B_in[get_idx(i, j, k+1)].get<0>() - b_center.get<0>()) - (B_in[get_idx(i+1, j, k)].get<2>() - b_center.get<2>())
+            let Jz = (B_in[get_idx(i+1, j, k)].get<1>() - b_center.get<1>()) - (B_in[get_idx(i, j+1, k)].get<0>() - b_center.get<0>())
 
-            # Исправленное векторное произведение Силы Лоренца: F = J × B
-            let F = SIMD[DType.float32, 4](
-                Jy * b_center[2] - Jz * b_center[1],
-                Jz * b_center[0] - Jx * b_center[2],
-                Jx * b_center[1] - Jy * b_center[0],
-                0.0
-            )
-            du_out[idx] = F
+            # Аппаратное Кросс-произведение SIMD для Силы Лоренца: F = J × B
+            let Fx = Jy * b_center.get<2>() - Jz * b_center.get<1>()
+            let Fy = Jz * b_center.get<0>() - Jx * b_center.get<2>()
+            let Fz = Jx * b_center.get<1>() - Jy * b_center.get<0>()
+            du_out[idx] = SIMD[DType.float32, 4](Fx, Fy, Fz, 0.0)
 
-            # Исправленная генерация индукционного поля E = -u × B
+            # Generation Электрического Поля E = -u × B через SIMD
             let u_center = u_in[idx]
-            e_ptr[idx] = SIMD[DType.float32, 4](
-                -(u_center[1] * b_center[2] - u_center[2] * b_center[1]),
-                -(u_center[2] * b_center[0] - u_center[0] * b_center[2]),
-                -(u_center[0] * b_center[1] - u_center[1] * b_center[0]),
-                0.0
-            )
+            let Ex = -(u_center.get<1>() * b_center.get<2>() - u_center.get<2>() * b_center.get<1>())
+            let Ey = -(u_center.get<2>() * b_center.get<0>() - u_center.get<0>() * b_center.get<2>())
+            let Ez = -(u_center.get<0>() * b_center.get<1>() - u_center.get<1>() * b_center.get<0>())
+            e_ptr[idx] = SIMD[DType.float32, 4](Ex, Ey, Ez, 0.0)
 
             # Вычисление амплитуды завихренности ω = curl u
-            let curl_ux = (u_in[get_idx(i, j+1, k)][2] - u_center[2]) - (u_in[get_idx(i, j, k+1)][1] - u_center[1])
-            let curl_uy = (u_in[get_idx(i, j, k+1)][0] - u_center[0]) - (u_in[get_idx(i+1, j, k)][2] - u_center[2])
-            let curl_uz = (u_in[get_idx(i+1, j, k)][1] - u_center[1]) - (u_in[get_idx(i, j+1, k)][0] - u_center[0])
+            let curl_ux = (u_in[get_idx(i, j+1, k)].get<2>() - u_center.get<2>()) - (u_in[get_idx(i, j, k+1)].get<1>() - u_center.get<1>())
+            let curl_uy = (u_in[get_idx(i, j, k+1)].get<0>() - u_center.get<0>()) - (u_in[get_idx(i+1, j, k)].get<2>() - u_center.get<2>())
+            let curl_uz = (u_in[get_idx(i+1, j, k)].get<1>() - u_center.get<1>()) - (u_in[get_idx(i, j+1, k)].get<0>() - u_center.get<0>())
             let omega = sqrt(curl_ux*curl_ux + curl_uy*curl_uy + curl_uz*curl_uz)
             
             # Атомарная редукция максимума (CAS Lock-Free)
@@ -197,9 +193,9 @@ struct MHDSimulation:
             let i = idx % DIM
 
             let e_c = e_ptr[idx]
-            let curl_Ex = (e_ptr[get_idx(i, j+1, k)][2] - e_c[2]) - (e_ptr[get_idx(i, j, k+1)][1] - e_c[1])
-            let curl_Ey = (e_ptr[get_idx(i, j, k+1)][0] - e_c[0]) - (e_ptr[get_idx(i+1, j, k)][2] - e_c[2])
-            let curl_Ez = (e_ptr[get_idx(i+1, j, k)][1] - e_c[1]) - (e_ptr[get_idx(i, j+1, k)][0] - e_c[0])
+            let curl_Ex = (e_ptr[get_idx(i, j+1, k)].get<2>() - e_c.get<2>()) - (e_ptr[get_idx(i, j, k+1)].get<1>() - e_c.get<1>())
+            let curl_Ey = (e_ptr[get_idx(i, j, k+1)].get<0>() - e_c.get<0>()) - (e_ptr[get_idx(i+1, j, k)].get<2>() - e_c.get<2>())
+            let curl_Ez = (e_ptr[get_idx(i+1, j, k)].get<1>() - e_c.get<1>()) - (e_ptr[get_idx(i, j+1, k)].get<0>() - e_c.get<0>())
 
             dB_out[idx] = SIMD[DType.float32, 4](-curl_Ex, -curl_Ey, -curl_Ez, 0.0)
 
@@ -252,8 +248,8 @@ struct MHDSimulation:
         for i in range(GRID_SIZE):
             let u_vec = self.u[i]
             let b_vec = self.B[i]
-            kin_energy += u_vec[0]*u_vec[0] + u_vec[1]*u_vec[1] + u_vec[2]*u_vec[2]
-            mag_energy += b_vec[0]*b_vec[0] + b_vec[1]*b_vec[1] + b_vec[2]*b_vec[2]
+            kin_energy += u_vec.get<0>()*u_vec.get<0>() + u_vec.get<1>()*u_vec.get<1>() + u_vec.get<2>()*u_vec.get<2>()
+            mag_energy += b_vec.get<0>()*b_vec.get<0>() + b_vec.get<1>()*b_vec.get<1>() + b_vec.get<2>()*b_vec.get<2>()
         return kin_energy * DX, mag_energy * DX
 
     fn save_vtk(self, filename: String) raises:
@@ -270,21 +266,21 @@ struct MHDSimulation:
         f.write("LOOKUP_TABLE default\n")
         for i in range(GRID_SIZE):
             var val = self.rho[i]
-            let bytes = val.bitcast[DType.uint32]().swap_bytes()
+            let bytes = bswap(val.bitcast[DType.uint32]())
             f.write(bytes)
         f.write("\nVECTORS velocity float\n")
         for i in range(GRID_SIZE):
             let vec = self.u[i]
-            let vx = vec[0].bitcast[DType.uint32]().swap_bytes()
-            let vy = vec[1].bitcast[DType.uint32]().swap_bytes()
-            let vz = vec[2].bitcast[DType.uint32]().swap_bytes()
+            let vx = bswap(vec.get<0>().bitcast[DType.uint32]())
+            let vy = bswap(vec.get<1>().bitcast[DType.uint32]())
+            let vz = bswap(vec.get<2>().bitcast[DType.uint32]())
             f.write(vx); f.write(vy); f.write(vz)
         f.write("\nVECTORS magnetic_field float\n")
         for i in range(GRID_SIZE):
             let vec = self.B[i]
-            let bx = vec[0].bitcast[DType.uint32]().swap_bytes()
-            let by = vec[1].bitcast[DType.uint32]().swap_bytes()
-            let bz = vec[2].bitcast[DType.uint32]().swap_bytes()
+            let bx = bswap(vec.get<0>().bitcast[DType.uint32]())
+            let by = bswap(vec.get<1>().bitcast[DType.uint32]())
+            let bz = bswap(vec.get<2>().bitcast[DType.uint32]())
             f.write(bx); f.write(by); f.write(bz)
         f.close()
 
