@@ -1,4 +1,3 @@
-cat << 'EOF' > mhd_hcp_supreme.mojo
 from math import sin, cos, sqrt
 from algorithm import parallelize
 from memory import UnsafePointer
@@ -57,8 +56,6 @@ fn get_hcp_shift(k: Int, m: Int) -> (Int, Int, Int):
         elif m == 9: return (0, 0, -1)
         elif m == 10: return (-1, 0, -1)
         else: return (0, -1, -1)
-EOF
-cat << 'EOF' >> mhd_hcp_supreme.mojo
 # =========================================================================
 # БЛОК 2: МГД СТРУКТУРА С ПОДДЕРЖКОЙ ВЕКТОРОВ SIMD И RK4 БУФЕРОВ
 # =========================================================================
@@ -145,13 +142,13 @@ struct MHDSimulation:
             let Jy = (B_in[get_idx(i, j, k+1)].get<0>() - b_center.get<0>()) - (B_in[get_idx(i+1, j, k)].get<2>() - b_center.get<2>())
             let Jz = (B_in[get_idx(i+1, j, k)].get<1>() - b_center.get<1>()) - (B_in[get_idx(i, j+1, k)].get<0>() - b_center.get<0>())
 
-            # Аппаратное Кросс-произведение SIMD для Силы Лоренца: F = J × B
+            # Сила Лоренца: F = J × B (Честное перекрестное произведение SIMD компонент)
             let Fx = Jy * b_center.get<2>() - Jz * b_center.get<1>()
             let Fy = Jz * b_center.get<0>() - Jx * b_center.get<2>()
             let Fz = Jx * b_center.get<1>() - Jy * b_center.get<0>()
             du_out[idx] = SIMD[DType.float32, 4](Fx, Fy, Fz, 0.0)
 
-            # Generation Электрического Поля E = -u × B через SIMD
+            # Генерация Электрического Поля E = -u × B
             let u_center = u_in[idx]
             let Ex = -(u_center.get<1>() * b_center.get<2>() - u_center.get<2>() * b_center.get<1>())
             let Ey = -(u_center.get<2>() * b_center.get<0>() - u_center.get<0>() * b_center.get<2>())
@@ -203,10 +200,8 @@ struct MHDSimulation:
             dB_out[idx] = SIMD[DType.float32, 4](-curl_Ex, -curl_Ey, -curl_Ez, 0.0)
 
         parallelize[compute_maxwell](GRID_SIZE)
-EOF
-cat << 'EOF' >> mhd_hcp_supreme.mojo
     # =========================================================================
-    # БЛОК 3: ДВИЖОК МНОГОСТАДИЙНОГО ВРЕМЕННОГО ИНТЕГРИРОВАНИЯ RK4
+    # БЛОК 3: ДВИЖОК МНОГОСТАДИЙНОГО ВРЕМЕННОГО ИНТЕГРИРОВАНИЯ RK4 И ИНСТРУМЕНТЫ
     # =========================================================================
     fn rk4_step(inout self):
         let k1_u = UnsafePointer[SIMD[DType.float32, 4]].alloc(GRID_SIZE)
@@ -315,4 +310,3 @@ fn main() raises:
             break
     log_file.close()
     print("[DONE] Симуляция успешно завершена.")
-EOF
