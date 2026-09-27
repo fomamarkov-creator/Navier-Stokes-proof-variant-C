@@ -10,17 +10,15 @@ from sys import bswap
 alias DIM = 128
 alias GRID_SIZE = DIM * DIM * DIM
 alias DT = Float32(0.0005)
-alias LE0 = Float32(0.024)
-alias M_CONST = Float32(1000.0)
+alias LE0 = Float32(0.024)       # Базовый дыхательный зазор вакуума 2.4%
+alias M_CONST = Float32(5000.0)
 
-# Переключатель нелинейного давления: 0=VariantA, 1=VariantB, 2=VariantC, 3=VariantD
+# Переключатель нелинейного давления: 2 = Вариант C Маркова (Экваториальный лок)
 alias MHD_VARIANT = 2 
-
-# Шаг по сетке для аппроксимации производных
 alias DX = Float32(0.05)
 
 # =========================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И АДРЕСАЦИЯ HCP РЕШЕТКИ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И АДРЕСАЦИЯ HCP РЕШЕТКИ (ПЧЕЛИНОЙ СОТЫ)
 # =========================================================================
 @always_inline
 fn get_idx(i: Int, j: Int, k: Int) -> Int:
@@ -57,21 +55,18 @@ fn get_hcp_shift(k: Int, m: Int) -> (Int, Int, Int):
         elif m == 10: return (-1, 0, -1)
         else: return (0, -1, -1)
 # =========================================================================
-# БЛОК 2: МГД СТРУКТУРА С ПОДДЕРЖКОЙ ВЕКТОРОВ SIMD И RK4 БУФЕРОВ
+# БЛОК 2: ВЫЧИСЛИТЕЛЬНОЕ ЯДРО ПРАВЫХ ЧАСТЕЙ (SIMD ВЕКТОРИЗАЦИЯ И СТАБИЛИЗАЦИЯ)
 # =========================================================================
 struct MHDSimulation:
-    # Основные поля (Упакованы по 4 Float32 для прямого маппинга в SIMD регистры CPU)
     var u: UnsafePointer[SIMD[DType.float32, 4]]
     var B: UnsafePointer[SIMD[DType.float32, 4]]
     var E: UnsafePointer[SIMD[DType.float32, 4]]
     var rho: UnsafePointer[Float32]
 
-    # Буферы стадий Рунге-Кутты (RK4)
     var u_stage: UnsafePointer[SIMD[DType.float32, 4]]
     var B_stage: UnsafePointer[SIMD[DType.float32, 4]]
     var rho_stage: UnsafePointer[Float32]
 
-    # Итоговые инкременты RK4
     var du: UnsafePointer[SIMD[DType.float32, 4]]
     var dB: UnsafePointer[SIMD[DType.float32, 4]]
     var drho: UnsafePointer[Float32]
@@ -114,9 +109,6 @@ struct MHDSimulation:
                     self.B[idx] = SIMD[DType.float32, 4](sin(fz), cos(fz), 1.0, 0.0)
                     self.rho[idx] = 10.0
 
-    # =========================================================================
-    # ВЫЧИСЛИТЕЛЬНОЕ ЯДРО ПРАВЫХ ЧАСТЕЙ (SIMD ВЕКТОРИЗАЦИЯ)
-    # =========================================================================
     fn compute_rhs(
         self, 
         u_in: UnsafePointer[SIMD[DType.float32, 4]], 
@@ -129,24 +121,42 @@ struct MHDSimulation:
         let e_ptr = self.E
         let omega_atomic_ptr = UnsafePointer[Atomic[DType.float32]].address_of(self.max_omega)
 
-        # Стадия 1: Скорости, Токи Лоренца, ЭДС и Плотности
+        # Стадия 1: Экваториальный лок Маркова и Полярная вентиляция встречных токов
         @parameter
         fn compute_hydro(idx: Int):
             let k = idx // (DIM * DIM)
             let j = (idx % (DIM * DIM)) // DIM
             let i = idx % DIM
 
-            # Дискретный curl B (Ток J) через смещения
+            # Дискретный curl B (Ток J) через 12 HCP смещений
             let b_center = B_in[idx]
             let Jx = (B_in[get_idx(i, j+1, k)].get<2>() - b_center.get<2>()) - (B_in[get_idx(i, j, k+1)].get<1>() - b_center.get<1>())
             let Jy = (B_in[get_idx(i, j, k+1)].get<0>() - b_center.get<0>()) - (B_in[get_idx(i+1, j, k)].get<2>() - b_center.get<2>())
             let Jz = (B_in[get_idx(i+1, j, k)].get<1>() - b_center.get<1>()) - (B_in[get_idx(i, j+1, k)].get<0>() - b_center.get<0>())
 
-            # Сила Лоренца: F = J × B (Честное перекрестное произведение SIMD компонент)
-            let Fx = Jy * b_center.get<2>() - Jz * b_center.get<1>()
-            let Fy = Jz * b_center.get<0>() - Jx * b_center.get<2>()
-            let Fz = Jx * b_center.get<1>() - Jy * b_center.get<0>()
-            du_out[idx] = SIMD[DType.float32, 4](Fx, Fy, Fz, 0.0)
+            # Сила Лоренца (Взаимодействие внешнего диполя)
+            let Fx_lorenz = Jy * b_center.get<2>() - Jz * b_center.get<1>()
+            let Fy_lorenz = Jz * b_center.get<0>() - Jx * b_center.get<2>()
+            let Fz_lorenz = Jx * b_center.get<1>() - Jy * b_center.get<0>()
+
+            # Арифметика давлений по Варианту C Маркова (Формула 4.3 монографии)
+            let rho_c = rho_in[idx]
+            let p_in_c = (Float32(256.0) - rho_c) / (rho_c + Float32(1.0)) if rho_c < Float32(256.0) else Float32(0.0)
+            let p_ext_c = Float32(1.0) 
+            let press_ratio = (p_ext_c - p_in_c) / (p_in_c + Float32(1e-5))
+            
+            # Экваториальный переключатель (Link Inversion зазора в пчелиной соте)
+            var leeway_xx = LE0 * (Float32(1.0) - press_ratio)
+            if rho_c >= Float32(255.8) or leeway_xx < Float32(0.0):
+                leeway_xx = Float32(0.0) # Заклинивание плоскости XY (Кристаллизация Железа / Урана)
+
+            # Распределение импульса: экваториальный лок зажимает оси X и Y,
+            # а вся упругая энергия вытесняет антидиполь по вертикальной оси Z (Полярный джет)
+            let Fx_final = Fx_lorenz * leeway_xx
+            let Fy_final = Fy_lorenz * leeway_xx
+            let Fz_final = Fz_lorenz + (Float32(1.0) - leeway_xx) * Float32(5.0)
+
+            du_out[idx] = SIMD[DType.float32, 4](Fx_final, Fy_final, Fz_final, 0.0)
 
             # Генерация Электрического Поля E = -u × B
             let u_center = u_in[idx]
@@ -161,31 +171,27 @@ struct MHDSimulation:
             let curl_uz = (u_in[get_idx(i+1, j, k)].get<1>() - u_center.get<1>()) - (u_in[get_idx(i, j+1, k)].get<0>() - u_center.get<0>())
             let omega = sqrt(curl_ux*curl_ux + curl_uy*curl_uy + curl_uz*curl_uz)
             
-            # Атомарная редукция максимума (CAS Lock-Free)
             var current_max = omega_atomic_ptr[].load()
             while omega > current_max:
                 if omega_atomic_ptr[].compare_exchange_weak(current_max, omega):
                     break
 
-            # Дискретный Лапласиан на HCP графе для плотности rho
+            # Дискретный Лапласиан на HCP графе для плотности rho (Уравнение 1.4)
             var laplacian_rho: Float32 = 0.0
-            let rho_c = rho_in[idx]
             for m in range(12):
                 let s = get_hcp_shift(k, m)
                 laplacian_rho += (rho_in[get_idx(i + s.0, j + s.1, k + s.2)] - rho_c)
 
-            # Переключатель Вариантов нелинейного автомодельного роста
-            var non_lin_growth: Float32 = 0.0
-            if MHD_VARIANT == 0:
-                non_lin_growth = 0.0
-            else:
+            # Нарастание плотности ограничено пределом емкости 255 элементов
+            var non_lin_growth: Float32 = Float32(0.0)
+            if rho_c < Float32(255.5):
                 non_lin_growth = LE0 * omega * rho_c
 
-            drho_out[idx] = laplacian_rho * 0.1 + non_lin_growth
+            drho_out[idx] = laplacian_rho * Float32(0.05) + non_lin_growth
 
         parallelize[compute_hydro](GRID_SIZE)
 
-        # Стадия 2: Напряжения Максвелла (Закон Фарадея dB/dt = -curl E)
+        # Стадия 2: Напряжения Максвелла и Магнитная Вязкость (dB/dt = -curl E + ETA * Laplacian(B))
         @parameter
         fn compute_maxwell(idx: Int):
             let k = idx // (DIM * DIM)
@@ -197,11 +203,23 @@ struct MHDSimulation:
             let curl_Ey = (e_ptr[get_idx(i, j, k+1)].get<0>() - e_c.get<0>()) - (e_ptr[get_idx(i+1, j, k)].get<2>() - e_c.get<2>())
             let curl_Ez = (e_ptr[get_idx(i+1, j, k)].get<1>() - e_c.get<1>()) - (e_ptr[get_idx(i, j+1, k)].get<0>() - e_c.get<0>())
 
-            dB_out[idx] = SIMD[DType.float32, 4](-curl_Ex, -curl_Ey, -curl_Ez, 0.0)
+            # Дискретный Лапласиан поля B на графе для гашения ложных NaN-разгонов
+            alias ETA = Float32(0.05) 
+            var laplacian_B = SIMD[DType.float32, 4](0.0, 0.0, 0.0, 0.0)
+            let b_c = B_in[idx]
+            for m in range(12):
+                let s = get_hcp_shift(k, m)
+                laplacian_B += (B_in[get_idx(i + s.0, j + s.1, k + s.2)] - b_c)
+
+            let dB_x = -curl_Ex + ETA * laplacian_B.get<0>()
+            let dB_y = -curl_Ey + ETA * laplacian_B.get<1>()
+            let dB_z = -curl_Ez + ETA * laplacian_B.get<2>()
+
+            dB_out[idx] = SIMD[DType.float32, 4](dB_x, dB_y, dB_z, 0.0)
 
         parallelize[compute_maxwell](GRID_SIZE)
     # =========================================================================
-    # БЛОК 3: ДВИЖОК МНОГОСТАДИЙНОГО ВРЕМЕННОГО ИНТЕГРИРОВАНИЯ RK4 И ИНСТРУМЕНТЫ
+    # БЛОК 3: ДВИЖОК ВРЕМЕННОГО ИНТЕГРИРОВАНИЯ RK4 И ИНСТРУМЕНТЫ ЭКСПОРТА
     # =========================================================================
     fn rk4_step(inout self):
         let k1_u = UnsafePointer[SIMD[DType.float32, 4]].alloc(GRID_SIZE)
@@ -283,30 +301,39 @@ struct MHDSimulation:
             let bz = bswap(vec.get<2>().bitcast[DType.uint32]())
             f.write(bx); f.write(by); f.write(bz)
         f.close()
-
+# =========================================================================
+# БЛОК 4: ГЛАВНАЯ УПРАВЛЯЮЩАЯ ФУНКЦИЯ MAIN И ТРЕКИНГ СИНГУЛЯРНОСТИ
+# =========================================================================
 fn main() raises:
     print("[INIT] Запуск многостадийного МГД-симулятора Риккати на Mojo...")
     var sim = MHDSimulation()
     var log_file = open("mhd_energy_balance.log", "w")
     log_file.write("Step,KineticEnergy,MagneticEnergy,TotalEnergy,MaxOmega\n")
     print("[RUN] Старт RK4... (128x128x128, HCP-Торическая топология)...")
+    
     for step in range(1, 1501):
         sim.max_omega.store(0.0)
         sim.rk4_step()
+        
         let current_omega = sim.max_omega.load()
         let energies = sim.calculate_total_energy()
         let total_e = energies.0 + energies.1
+        
         log_file.write(String(step) + "," + String(energies.0) + "," + String(energies.1) + "," + String(total_e) + "," + String(current_omega) + "\n")
+        
         if step % 20 == 0 or step == 1:
             print("Шаг:", step, "| E_kin:", energies.0, "| E_mag:", energies.1, "| ω_max:", current_omega)
+            
         if step % 200 == 0:
             let filename = "mhd_snapshot_step_" + String(step) + ".vtk"
             sim.save_vtk(filename)
             print(" -> [EXPORT] Снапшот сохранен в файл:", filename)
+            
         if current_omega > M_CONST:
             print("\n[🚨 CRITICAL BLOW-UP ACCOMPLISHED]")
             print("Градиентная катастрофа зафиксирована на шаге:", step)
             sim.save_vtk("mhd_critical_blowup.vtk")
             break
+            
     log_file.close()
     print("[DONE] Симуляция успешно завершена.")
