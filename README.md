@@ -38,6 +38,13 @@ A grid convergence study up to \(256 \times 256 \times 256\) nodes demonstrates 
 Detailed analytical observations and metrics can be reviewed in the primary repository documentation [10.5281/zenodo.22976921].
 
 ---
+### Результаты верификации МГД-модели
+
+![Тест 1: Баланс энергии](График1.png)
+![Тест 2: Критерий Максвелла](График2.png)
+![Тест 3: Сохранение топологии](График3.png)
+![Тест 4: Спектральная плотность БПФ](График4.png)
+
 
 ## Verification Execution & Compilation Guide
 
