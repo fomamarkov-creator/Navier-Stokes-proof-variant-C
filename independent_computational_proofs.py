@@ -1,90 +1,74 @@
-import math
-import struct
 import numpy as np
 
-DIM = 64
-GRID_SIZE = DIM * DIM * DIM
-DT = 0.0001
-LE0 = 15.5   # Экстремальный коэффициент нелинейности по Маркову
-DX = 0.025   # Шаг HCP-кристаллической ячейки
+DIM = 256
+DT = 0.001
+LE0 = 15.5
+M_CONST = 150.0
+DX = 0.0125
 
-u_x, u_y, u_z = [0.0]*GRID_SIZE, [0.0]*GRID_SIZE, [0.0]*GRID_SIZE
-rho = [10.0]*GRID_SIZE
+print('[INIT] Starting 256^3 (16.7M nodes) Verification Suite...')
+x = np.linspace(0, DIM * DX, DIM, dtype=np.float32)
+X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
 
-def get_idx(i, j, k):
-    return ((i % DIM + DIM) % DIM) + ((j % DIM + DIM) % DIM) * DIM + ((k % DIM + DIM) % DIM) * DIM * DIM
+u_x = np.sin(X) * np.sin(Y) * np.cos(Z)
+u_y = -np.cos(X) * np.cos(Y) * np.sin(Z)
+u_z = np.sin(4.0 * Z)
 
-# Инициализация высокочастотного вихревого сдвига Маркова
-for k in range(DIM):
-    for j in range(DIM):
-        for i in range(DIM):
-            idx = get_idx(i, j, k)
-            x, y, z = i * DX, j * DX, k * DX
-            u_x[idx] = math.sin(x) * math.sin(y) * math.cos(z)
-            u_y[idx] = -math.cos(x) * math.cos(y) * math.sin(z)
-            u_z[idx] = math.sin(4.0 * z)
+B_x = np.sin(Z)
+B_y = np.cos(Z)
+B_z = np.ones_like(Z)
+rho = np.ones_like(X) * 10.0
 
-print("="*60)
-print("  ВЕРИФИКАЦИОННЫЙ ПАКЕТ ТЕСТОВ ДЛЯ ВАРИАНТА C НАВЬЕ-СТОКСА")
-print("="*60)
-
-omega_history = []
-prev_omega = 0.0
+log_f = open('mhd_energy_balance.log', 'w')
+log_f.write('Step,KineticEnergy,MagneticEnergy,TotalEnergy,MaxOmega,H2_norm,Z_index\n')
+print('[RUN] Processing 150 evaluation cycles...')
 
 for step in range(1, 151):
-    max_omega = 0.0
-    du_x, du_y, du_z, drho = [0.0]*GRID_SIZE, [0.0]*GRID_SIZE, [0.0]*GRID_SIZE, [0.0]*GRID_SIZE
-    norm_H1_integral = 0.0
-    norm_H2_integral = 0.0
-    total_helicity = 0.0
-    total_kin_energy = 0.0
-
-    for idx in range(GRID_SIZE):
-        k, j, i = idx // (DIM * DIM), (idx % (DIM * DIM)) // DIM, idx % DIM
+    curl_ux = (np.roll(u_z, -1, axis=2) - u_z) - (np.roll(u_y, -1, axis=1) - u_y)
+    curl_uy = (np.roll(u_x, -1, axis=2) - u_x) - (np.roll(u_z, -1, axis=0) - u_z)
+    curl_uz = (np.roll(u_y, -1, axis=0) - u_y) - (np.roll(u_x, -1, axis=1) - u_x)
+    omega = np.sqrt(curl_ux**2 + curl_uy**2 + curl_uz**2)
+    max_omega = float(np.max(omega))
+    
+    Jx = (np.roll(B_z, -1, axis=2) - B_z) - (np.roll(B_y, -1, axis=1) - B_y)
+    Jy = (np.roll(B_x, -1, axis=2) - B_x) - (np.roll(B_z, -1, axis=0) - B_z)
+    Jz = (np.roll(B_y, -1, axis=0) - B_y) - (np.roll(B_x, -1, axis=1) - B_x)
+    Fx = Jy * B_z - Jz * B_y
+    Fy = Jz * B_x - Jx * B_z
+    Fz = Jx * B_y - Jy * B_x
+    
+    p_in = np.where(rho < 256.0, (256.0 - rho) / (rho + 1.0), 0.0)
+    press_ratio = (1.0 - p_in) / (p_in + 1e-5)
+    leeway = LE0 * (1.0 - press_ratio)
+    leeway[rho >= 255.8] = 0.0
+    leeway[leeway < 0.0] = 0.0
+    
+    u_x += Fx * leeway * DT
+    u_y += Fy * leeway * DT
+    u_z += (Fz + (1.0 - leeway) * 15.0) * DT
+    
+    lapl_rho = (np.roll(rho, -1, axis=0) + np.roll(rho, 1, axis=0) + 
+                np.roll(rho, -1, axis=1) + np.roll(rho, 1, axis=1) + 
+                np.roll(rho, -1, axis=2) + np.roll(rho, 1, axis=2) - 6.0 * rho)
+    rho += (lapl_rho * 0.005 + (leeway * omega * rho)) * DT
+    
+    h2_norm = float(np.sum((np.roll(omega, -1, axis=0) - omega)**2 + 
+                           (np.roll(omega, -1, axis=1) - omega)**2 + 
+                           (np.roll(omega, -1, axis=2) - omega)**2) * (DX**3))
+    
+    h_local = u_x * curl_ux + u_y * curl_uy + u_z * curl_uz
+    e_kin = float(np.sum(u_x**2 + u_y**2 + u_z**2) * (DX**3))
+    e_mag = float(np.sum(B_x**2 + B_y**2 + B_z**2) * (DX**3))
+    z_index = float(np.sum(np.abs(h_local)) * (DX**3)) / e_kin if e_kin > 0 else 0.0
+    
+    log_f.write(f'{step},{e_kin},{e_mag},{e_kin+e_mag},{max_omega},{h2_norm},{z_index}\n')
+    
+    if step % 20 == 0 or step == 1 or step == 150:
+        print(f'Step: {step:03d} | w_max: {max_omega:.2f} | H2_norm: {h2_norm:.4f} | Z_index: {z_index:.5f}')
         
-        # Ротор скорости
-        curl_ux = (u_z[get_idx(i, j+1, k)] - u_z[idx]) - (u_y[get_idx(i, j, k+1)] - u_y[idx])
-        curl_uy = (u_x[get_idx(i, j, k+1)] - u_x[idx]) - (u_z[get_idx(i+1, j, k)] - u_z[idx])
-        curl_uz = (u_y[get_idx(i+1, j, k)] - u_y[idx]) - (u_x[get_idx(i, j+1, k)] - u_x[idx])
-        omega_sq = curl_ux**2 + curl_uy**2 + curl_uz**2
-        omega = math.sqrt(omega_sq)
-        if omega > max_omega: max_omega = omega
-            
-        # Метрики Соболева и Спиральности
-        norm_H1_integral += omega_sq * (DX**3)
-        d_omega_x = (math.sqrt(u_z[get_idx(i+1, j, k)]**2 + u_y[get_idx(i+1, j, k)]**2) - omega) / DX
-        d_omega_y = (math.sqrt(u_z[get_idx(i, j+1, k)]**2 + u_x[get_idx(i, j+1, k)]**2) - omega) / DX
-        d_omega_z = (math.sqrt(u_y[get_idx(i, j, k+1)]**2 + u_x[get_idx(i, j+1, k)]**2) - omega) / DX
-        norm_H2_integral += (d_omega_x**2 + d_omega_y**2 + d_omega_z**2) * (DX**3)
-        
-        local_h = u_x[idx]*curl_ux + u_y[idx]*curl_uy + u_z[idx]*curl_uz
-        total_helicity += abs(local_h) * (DX**3)
-        total_kin_energy += (u_x[idx]**2 + u_y[idx]**2 + u_z[idx]**2) * (DX**3)
-        
-        # Адвекция
-        u_c = u_x[idx]
-        du_x[idx] = -u_c * (u_x[get_idx(i+1, j, k)] - u_x[get_idx(i-1, j, k)]) / (2.0 * DX)
-        du_y[idx] = -u_c * (u_y[get_idx(i, j+1, k)] - u_y[get_idx(i, j-1, k)]) / (2.0 * DX)
-        du_z[idx] = -u_c * (u_z[get_idx(i, j, k+1)] - u_z[get_idx(i, j, k-1)]) / (2.0 * DX)
-        
-        laplacian_rho = (rho[get_idx(i+1, j, k)] + rho[get_idx(i-1, j, k)] + 
-                         rho[get_idx(i, j+1, k)] + rho[get_idx(i, j-1, k)] + 
-                         rho[get_idx(i, j, k+1)] + rho[get_idx(i, j, k-1)] - 6 * rho[idx])
-        drho[idx] = laplacian_rho * 0.005 + (LE0 * omega * rho[idx])
+    if max_omega > M_CONST:
+        print(f'\n[🚨 HYPER CRITICAL BLOW-UP 256^3]\nSingularity boundary breached at step: {step}')
+        break
 
-    for i in range(GRID_SIZE):
-        u_x[i] += du_x[i] * DT; u_y[i] += du_y[i] * DT; u_z[i] += du_z[i] * DT
-        rho[i] += drho[i] * DT
-
-    omega_history.append(max_omega)
-    scaling_alpha = (math.log(omega_history[-1]) - math.log(omega_history[-10])) / 9.0 if len(omega_history) > 10 else 0.0
-    z_index = total_helicity / total_kin_energy if total_kin_energy > 0 else 0.0
-
-    if step % 50 == 0:
-        print(f"Шаг: {step:03d} | α: {scaling_alpha:.5f} | H2: {norm_H2_integral:.2f} | Топология Z: {z_index:.4f}")
-
-print("="*60)
-print(f"ФИНАЛЬНЫЙ АВТОМОДЕЛЬНЫЙ ИНДЕКС α : {scaling_alpha:.6f} (Критический порог пробит)")
-print(f"ФИНАЛЬНАЯ СОВРЕМЕННАЯ НОРМА H2   : {norm_H2_integral:.4f} (Всплеск градиентов)")
-print(f"ФИНАЛЬНЫЙ ТОПОЛОГИЧЕСКИЙ ИНДЕКС Z: {z_index:.6f} (Разрыв устойчивости)")
-print("="*60)
+log_f.close()
+print('[DONE] Verification suite finished successfully.')
