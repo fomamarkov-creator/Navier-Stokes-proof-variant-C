@@ -40,7 +40,8 @@ Detailed analytical observations and metrics can be reviewed in the primary repo
 ---
 ### Результаты верификации МГД-модели
 
-(График1.png) 
+![Графики тестов](График1.png)
+
 ![Тест 1: Баланс энергии]
 
 ![Тест 2: Критерий Максвелла]
