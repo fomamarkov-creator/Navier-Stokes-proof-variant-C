@@ -50,6 +50,8 @@ Detailed analytical observations and metrics can be reviewed in the primary repo
 
 ![Тест 4: Спектральная плотность БПФ]
 
+![Двухпанельный график контроля скейлинга](График5.png)
+
 
 ## Verification Execution & Compilation Guide
 
