@@ -1,0 +1,10 @@
+MHD VERIFICATION REPORT
+Date: 2026-09-30 11:01:59.633218
+Grid: 256^3
+Initial Energy: 1.85379e+02
+Final Energy: 1.00291e+06
+Max divB: 0.00000e+00
+Initial H_cross: -14.31273
+Final H_cross: -2136.72778
+Final w_max: 48.1604
+Spectral E_k_max: 1.73735e-02
